@@ -1,0 +1,38 @@
+name: ColumnsGame
+version: 1.0-SNAPSHOT
+main: ru.columns.ColumnsPlugin
+api-version: '1.21'
+description: Плагин для мини-игры "Столбы" в Minecraft
+commands:
+  colstart:
+    description: Запускает игру "Столбы"
+    usage: /colstart [интервал_в_секундах] [минут_до_смыкания_границ]
+    permission: columns.admin
+  colend:
+    description: Завершает игру "Столбы"
+    usage: /colend
+    permission: columns.admin
+  assigncols:
+    description: Начинает процесс назначения позиций столбов
+    usage: /assigncols
+    permission: columns.admin
+  assigndone:
+    description: Завершает процесс назначения позиций столбов
+    usage: /assigndone
+    permission: columns.admin
+  assignlobby:
+    description: Устанавливает позицию лобби
+    usage: /assignlobby
+    permission: columns.admin
+  assignplayfield:
+    description: Устанавливает поле игры
+    usage: /assignplayfield
+    permission: columns.admin
+  rmassigndat:
+    description: Удаляет все данные плагина
+    usage: /rmassigndat
+    permission: columns.admin
+permissions:
+  columns.admin:
+    description: Доступ к административным командам плагина Columns
+    default: op
