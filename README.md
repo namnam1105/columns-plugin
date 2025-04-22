@@ -47,4 +47,8 @@
 
 - Windows CMD
 
+<<<<<<< HEAD
 ```gradlew build```
+=======
+```gradlew build```
+>>>>>>> a889c700b8ec71cb07514e56d382c7a8b1da6059
