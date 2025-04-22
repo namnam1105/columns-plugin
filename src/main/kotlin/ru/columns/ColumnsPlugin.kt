@@ -6,8 +6,9 @@ import org.bukkit.GameMode
 import org.bukkit.GameRule
 import org.bukkit.Location
 import org.bukkit.Material
-import org.bukkit.World
-import org.bukkit.WorldBorder
+import org.bukkit.block.Barrel
+import org.bukkit.block.Chest
+import org.bukkit.block.Container
 import org.bukkit.boss.BarColor
 import org.bukkit.boss.BarStyle
 import org.bukkit.boss.BossBar
@@ -21,6 +22,7 @@ import org.bukkit.event.Listener
 import org.bukkit.event.entity.PlayerDeathEvent
 import org.bukkit.event.player.PlayerGameModeChangeEvent
 import org.bukkit.event.player.PlayerInteractEvent
+import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.inventory.ItemStack
 import org.bukkit.plugin.java.JavaPlugin
 import org.bukkit.potion.PotionEffect
@@ -29,16 +31,16 @@ import org.bukkit.scheduler.BukkitTask
 import org.bukkit.scoreboard.DisplaySlot
 import org.bukkit.scoreboard.Scoreboard
 import java.io.File
-import java.util.*
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.random.Random
 
 class ColumnsPlugin : JavaPlugin(), Listener {
     // Game state
     private val columnPositions = mutableListOf<Location>()
     private var lobbyLocation: Location? = null
     private var isGameRunning = false
-    private val playersInGame = mutableSetOf<Player>()
+    private var playersInGame = mutableSetOf<Player>()
     private var gameTask: BukkitTask? = null
     private var isModeSelection = false
     private var isPlayfieldSelection = false
@@ -47,8 +49,12 @@ class ColumnsPlugin : JavaPlugin(), Listener {
     private var worldBorderCenter: Location? = null
     private var originalWorldBorderSize: Double = 0.0
     private var worldBorderShrinkTask: BukkitTask? = null
+    private var killAllTask: BukkitTask? = null
     private val blockStates = mutableMapOf<Location, BlockState>()
+    private val blockInventories = mutableMapOf<Location, List<ItemStack?>>()
     private val entitiesToRemove = mutableSetOf<Entity>()
+    private var chestPosition: Location? = null
+    private var isChestSelection: Boolean = false
 
     // Scoreboard variables
     private var gameScoreboard: Scoreboard? = null
@@ -79,8 +85,10 @@ class ColumnsPlugin : JavaPlugin(), Listener {
 
     override fun onDisable() {
         // End game if running
-        if (isGameRunning) {
+        try {
             endGame()
+        } catch (e: Exception) {
+            println("no end gmae")
         }
 
         // Save game data
@@ -91,6 +99,46 @@ class ColumnsPlugin : JavaPlugin(), Listener {
 
         logger.info("ColumnsGame plugin has been disabled!")
     }
+
+    private fun setupChest() {
+        val chestPos = chestPosition ?: run {
+            Bukkit.broadcastMessage("${ChatColor.RED}Ошибка: позиция сундука не задана!")
+            return
+        }
+
+        chestPos.world?.loadChunk(chestPos.blockX shr 4, chestPos.blockZ shr 4)
+
+        val block = chestPos.block
+        block.type = Material.BARREL
+
+        // Выполнить действия через 1 тик, чтобы блок успел "примениться"
+        Bukkit.getScheduler().runTask(this, Runnable {
+            val barrelState = block.state as? Barrel ?: run {
+                Bukkit.broadcastMessage("${ChatColor.RED}Ошибка: не удалось получить состояние бочки!")
+                return@Runnable
+            }
+
+            println("[DEBUG] chestLoot содержимое: ${chestLoot.map { it.type }}")
+
+            barrelState.inventory.clear()
+            val addedItems = mutableListOf<ItemStack>()
+
+            Bukkit.getScheduler().runTaskLater(this, Runnable {
+                val checkBlock = chestPos.block
+                if (checkBlock.type == Material.BARREL) {
+                    val state = checkBlock.state as? Barrel
+                    val items = state?.inventory?.contents?.filterNotNull()
+                    repeat(Random.nextInt(4, 11)) {
+                        val randomChoice = chestLoot.random()
+                        barrelState.inventory.addItem(randomChoice.clone())
+                        addedItems.add(randomChoice)
+                    }
+                }
+            }, 100L)
+        })
+    }
+
+
 
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
 
@@ -142,6 +190,7 @@ class ColumnsPlugin : JavaPlugin(), Listener {
                 }
 
                 isModeSelection = true
+                isChestSelection = false
                 isPlayfieldSelection = false
 
                 // Give the player a selection tool
@@ -161,6 +210,16 @@ class ColumnsPlugin : JavaPlugin(), Listener {
                 }
                 isModeSelection = false
                 isPlayfieldSelection = false
+                // check inventory
+                val inventory = sender.inventory
+                for (i in 0 until inventory.size) {
+                    val item = inventory.getItem(i);
+                    if (item?.type == Material.BLAZE_ROD && item.itemMeta?.displayName?.contains("Метка") == true) {
+                        item.amount = 0
+                    }
+                }
+                sender.updateInventory()
+
                 sender.sendMessage("${ChatColor.GREEN}Режим выбора отключен.")
                 return true
             }
@@ -189,6 +248,7 @@ class ColumnsPlugin : JavaPlugin(), Listener {
                 }
 
                 isModeSelection = false
+                isChestSelection = false
                 isPlayfieldSelection = true
                 playfieldCorner1 = null
                 playfieldCorner2 = null
@@ -203,6 +263,27 @@ class ColumnsPlugin : JavaPlugin(), Listener {
                 sender.inventory.addItem(selectorTool)
                 return true
             }
+            "assignchest" -> {
+                if (sender !is Player) {
+                    sender.sendMessage("${ChatColor.RED}Команды должны выполняться игроком!")
+                    return true
+                }
+                if (isGameRunning) {
+                    sender.sendMessage("${ChatColor.RED}Нельзя изменять игровое поле во время игры!")
+                    return true
+                }
+                isModeSelection = false
+                isChestSelection = true
+                isPlayfieldSelection = false
+                chestPosition = null
+                val selectorTool = ItemStack(Material.BLAZE_ROD)
+                val meta = selectorTool.itemMeta
+                meta?.setDisplayName("${ChatColor.GOLD}Метка сундука")
+                selectorTool.itemMeta = meta
+                sender.sendMessage("${ChatColor.GREEN}Режим выбора сундука активирован! Используйте огненную палку для отметки блока, вместо которого должен стоять сундук")
+                sender.inventory.addItem(selectorTool)
+                return true
+            }
             "rmassigndat" -> {
                 // Удаление всех сохраненных данных
                 columnPositions.clear()
@@ -210,11 +291,13 @@ class ColumnsPlugin : JavaPlugin(), Listener {
                 playfieldCorner1 = null
                 playfieldCorner2 = null
                 worldBorderCenter = null
+                chestPosition = null
 
                 // Удаление файлов с данными
                 File(dataFolder, "columns.dat").delete()
                 File(dataFolder, "lobby.dat").delete()
                 File(dataFolder, "playfield.dat").delete()
+                File(dataFolder, "chest.dat").delete()
 
                 sender.sendMessage("${ChatColor.GREEN}Все сохраненные настройки удалены!")
                 return true
@@ -278,9 +361,17 @@ class ColumnsPlugin : JavaPlugin(), Listener {
 
                     player.sendMessage("${ChatColor.GREEN}Игровое поле установлено с расширением +30 блоков! Центр: $centerX, $centerZ")
                     isPlayfieldSelection = false
+                    item.amount = 0
                 }
+            } else if (isChestSelection) {
+                val clickedBlock = event.clickedBlock;
+                val location = clickedBlock?.location?.clone()?.add(-0.0,0.0,-0.0)
+                chestPosition = location;
+                player.sendMessage("${ChatColor.GREEN}Отмечен сундук на ${location?.x} ${location?.y} ${location?.z}")
+                item.amount = 0
             }
         }
+        player.updateInventory()
     }
 
     @EventHandler
@@ -293,11 +384,21 @@ class ColumnsPlugin : JavaPlugin(), Listener {
             Bukkit.getScheduler().runTaskLater(this, Runnable {
                 player.gameMode = GameMode.SPECTATOR
                 player.sendMessage("${ChatColor.RED}Вы выбыли из игры!")
+                playersInGame.remove(player)
 
                 // Обновляем Scoreboard
                 updateScoreboard()
             }, 1L)
         }
+    }
+
+    @EventHandler
+    fun onPlayerDisconnect(event: PlayerQuitEvent) {
+        if (!isGameRunning) return
+        val player = event.player;
+        Bukkit.getScheduler().runTaskLater(this, Runnable {
+            playersInGame.remove(player);
+        }, 1L)
     }
 
     @EventHandler
@@ -307,7 +408,7 @@ class ColumnsPlugin : JavaPlugin(), Listener {
         // Check if all players are in spectator mode
         Bukkit.getScheduler().runTaskLater(this, Runnable {
             checkGameStatus()
-            // Обновляем Scoreboard при изменении режима игры
+            playersInGame.remove(event.player)
             updateScoreboard()
         }, 1L)
     }
@@ -333,6 +434,14 @@ class ColumnsPlugin : JavaPlugin(), Listener {
         currentItemInterval = interval
         itemCountdownTicks = interval * 20
         itemCountdownSeconds = interval
+
+        // Set all online players to survival mode
+        Bukkit.getOnlinePlayers().forEach { player ->
+            player.gameMode = GameMode.SURVIVAL
+        }
+
+        // Now add all players to the game (since they're all in survival now)
+        playersInGame = Bukkit.getOnlinePlayers().toMutableSet()
 
         // Set time to day and clear weather
         val world = worldBorderCenter!!.world
@@ -370,9 +479,11 @@ class ColumnsPlugin : JavaPlugin(), Listener {
 
         // Start shrinking world border to the center (finalSize = 0)
 
-        Bukkit.getScheduler().runTaskLater(this, Runnable {
+        // Break out of this is the round is ended.
+
+        worldBorderShrinkTask = Bukkit.getScheduler().runTaskLater(this, Runnable {
             worldBorder.setSize(0.0, shrinkTimeSeconds)
-            Bukkit.getScheduler().runTaskLater(this, Runnable {
+            killAllTask = Bukkit.getScheduler().runTaskLater(this, Runnable {
                 killPlayersAliveIn10Secs();
             }, shrinkTimeSeconds * 20L)
         }, 0)
@@ -416,7 +527,10 @@ class ColumnsPlugin : JavaPlugin(), Listener {
         healAllPlayers(true);
         applyMaxSlowToAll();
         healAllPlayers(false);
+        setupChest()
+
     }
+
 
     private fun killPlayersAliveIn10Secs() {
         Bukkit.broadcastMessage("${ChatColor.RED}Зона сжалась! Все живые игроки умрут через 10 секунд!")
@@ -457,14 +571,12 @@ class ColumnsPlugin : JavaPlugin(), Listener {
         }
 
         // Add active players to scoreboard
-        var score = playersInGame.count { it.gameMode != GameMode.SPECTATOR }
+        var score = playersInGame.count();
 
         for (player in playersInGame) {
-            if (player.gameMode != GameMode.SPECTATOR) {
                 val entryName = "${ChatColor.GREEN}${player.name}"
                 objective.getScore(entryName).score = score
                 score--
-            }
         }
 
         // If there are no active players, show a message
@@ -546,6 +658,8 @@ class ColumnsPlugin : JavaPlugin(), Listener {
     private fun endGame() {
         if (!isGameRunning) return
 
+        playersInGame = Bukkit.getOnlinePlayers().toMutableSet()
+
         isGameRunning = false
         gameTask?.cancel()
         gameTask = null
@@ -557,6 +671,9 @@ class ColumnsPlugin : JavaPlugin(), Listener {
         // Remove bossbar
         itemBossBar?.removeAll()
         itemBossBar = null
+        // Cancel border task
+        worldBorderShrinkTask?.cancel();
+        killAllTask?.cancel();
 
         // Reset world border
         val world = worldBorderCenter?.world ?: return
@@ -590,6 +707,7 @@ class ColumnsPlugin : JavaPlugin(), Listener {
 
         playersInGame.clear()
 
+
         // Re-enable weather cycle
         world.setGameRule(GameRule.DO_WEATHER_CYCLE, true)
 
@@ -599,33 +717,29 @@ class ColumnsPlugin : JavaPlugin(), Listener {
     private fun distributePlayersToColumns() {
         playersInGame.clear()
 
-        // Collect all online players
-        val onlinePlayers = Bukkit.getOnlinePlayers().toList()
-
-        // Assign players to columns randomly
+        // All players are already in survival mode at this point
+        val allPlayers = Bukkit.getOnlinePlayers().toList()
         val shuffledColumns = columnPositions.shuffled()
 
-        for ((index, player) in onlinePlayers.withIndex()) {
+        for ((index, player) in allPlayers.withIndex()) {
             if (index < shuffledColumns.size) {
                 // Assign this player to a column
                 val columnPos = shuffledColumns[index]
                 player.teleport(columnPos)
-                player.gameMode = GameMode.SURVIVAL
-                player.inventory.clear() // Start with clear inventory
+                player.inventory.clear()
                 playersInGame.add(player)
                 player.sendMessage("${ChatColor.GREEN}Вы играете на столбе #${columnPositions.indexOf(columnPos) + 1}!")
             } else {
-                // Extra players go to spectator mode
+                // If we run out of columns, put extra players in spectator mode
                 player.teleport(shuffledColumns.first())
                 player.gameMode = GameMode.SPECTATOR
-                player.sendMessage("${ChatColor.YELLOW}Вы наблюдаете за игрой!")
+                playersInGame.remove(player)
+                player.sendMessage("${ChatColor.YELLOW}Вы наблюдаете за игрой (не хватило столбов)!")
             }
         }
 
-        // Update scoreboard after distributing players
         updateScoreboard()
     }
-
     private fun giveRandomItems() {
         if (playersInGame.isEmpty()) return
 
@@ -653,7 +767,7 @@ class ColumnsPlugin : JavaPlugin(), Listener {
 
     private fun checkGameStatus() {
         // Count active players
-        val activePlayers = playersInGame.count { it.gameMode != GameMode.SPECTATOR }
+        val activePlayers = playersInGame.count()
 
         // If only one or zero players left, end the game
         if (activePlayers <= 1) {
@@ -709,6 +823,7 @@ class ColumnsPlugin : JavaPlugin(), Listener {
 
     private fun saveBlockStates() {
         blockStates.clear()
+        blockInventories.clear()
 
         val corner1 = playfieldCorner1 ?: return
         val corner2 = playfieldCorner2 ?: return
@@ -720,7 +835,7 @@ class ColumnsPlugin : JavaPlugin(), Listener {
         val minZ = min(corner1.blockZ, corner2.blockZ)
 
         val maxX = max(corner1.blockX, corner2.blockX)
-        val maxY = max(corner1.blockY, corner2.blockY)
+        val maxY = 319
         val maxZ = max(corner1.blockZ, corner2.blockZ)
 
         // Save block states in the playfield
@@ -730,6 +845,11 @@ class ColumnsPlugin : JavaPlugin(), Listener {
                     val loc = Location(world, x.toDouble(), y.toDouble(), z.toDouble())
                     val block = loc.block
                     blockStates[loc] = BlockState(block.type)
+                    if (block.state is Container && block.state !is Chest) {
+                        val container = block.state as Container
+                        val inventory = container.inventory.contents.map {it?.clone()}
+                        blockInventories[loc] = inventory.toList()
+                    }
                 }
             }
         }
@@ -738,6 +858,13 @@ class ColumnsPlugin : JavaPlugin(), Listener {
     private fun restoreBlockStates() {
         for ((loc, state) in blockStates) {
             loc.block.type = state.material
+            if ( loc.block.state is Container ) {
+                val containerBlock = loc.block.state as Container
+                val savedInventory = blockInventories[loc]
+                savedInventory?.forEachIndexed { index, itemStack ->
+                    containerBlock.inventory.setItem(index, itemStack?.clone())
+                }
+            }
         }
         blockStates.clear()
     }
@@ -778,10 +905,48 @@ class ColumnsPlugin : JavaPlugin(), Listener {
         entitiesToRemove.clear()
     }
 
+    private val chestLoot = listOf(
+        ItemStack(Material.WATER_BUCKET),
+        ItemStack(Material.FISHING_ROD),
+        ItemStack(Material.FLINT_AND_STEEL),
+        ItemStack(Material.NETHERITE_HOE),
+        ItemStack(Material.WOODEN_PICKAXE, 4),
+        ItemStack(Material.NAME_TAG),
+        ItemStack(Material.SADDLE),
+        ItemStack(Material.COMPASS),
+        ItemStack(Material.CLOCK),
+        ItemStack(Material.MUSIC_DISC_CAT),
+        ItemStack(Material.MUSIC_DISC_BLOCKS),
+        ItemStack(Material.SLIME_BALL, 3),
+        ItemStack(Material.BONE, 8),
+        ItemStack(Material.STRING, 6),
+        ItemStack(Material.GLASS_BOTTLE, 3),
+        ItemStack(Material.HONEY_BOTTLE),
+        ItemStack(Material.FEATHER, 4),
+        ItemStack(Material.FLOWER_POT),
+        ItemStack(Material.ITEM_FRAME),
+        ItemStack(Material.PAINTING),
+        ItemStack(Material.ELYTRA),
+        ItemStack(Material.SNOWBALL, 16),
+        ItemStack(Material.BOOK),
+        ItemStack(Material.TOTEM_OF_UNDYING),
+        ItemStack(Material.NETHERITE_SHOVEL),
+        ItemStack(Material.ENDER_EYE),
+        ItemStack(Material.CHAIN, 5),
+        ItemStack(Material.LADDER, 3),
+        ItemStack(Material.SCAFFOLDING, 6),
+        ItemStack(Material.SHEARS),
+        ItemStack(Material.SPYGLASS),
+        ItemStack(Material.CAT_SPAWN_EGG),
+        ItemStack(Material.WIND_CHARGE, 5)
+    )
+
+
     private fun loadData() {
         val columnsFile = File(dataFolder, "columns.dat")
         val lobbyFile = File(dataFolder, "lobby.dat")
         val playfieldFile = File(dataFolder, "playfield.dat")
+        val chestFile = File(dataFolder, "chest.dat")
 
         if (columnsFile.exists()) {
             columnsFile.readLines().forEach { line ->
@@ -852,12 +1017,28 @@ class ColumnsPlugin : JavaPlugin(), Listener {
                 logger.warning("Error loading playfield data")
             }
         }
+        if (chestFile.exists()) {
+            chestFile.readLines().forEach {line ->
+                try {
+                    val parts = line.split(",");
+                    val world = Bukkit.getWorld(parts[0]) ?: return@forEach
+                    val x = parts[1].toDouble()
+                    val y = parts[2].toDouble()
+                    val z = parts[3].toDouble()
+                    chestPosition = Location(world,x,y,z);
+                }
+                catch (e: Exception) {
+                    logger.warning("Error chest location: $line")
+                }
+            }
+        }
     }
 
     private fun saveData() {
         val columnsFile = File(dataFolder, "columns.dat")
         val lobbyFile = File(dataFolder, "lobby.dat")
         val playfieldFile = File(dataFolder, "playfield.dat")
+        val chestFile = File(dataFolder, "chest.dat")
 
         // Save column positions
         columnsFile.printWriter().use { writer ->
@@ -870,6 +1051,12 @@ class ColumnsPlugin : JavaPlugin(), Listener {
         lobbyLocation?.let { loc ->
             lobbyFile.printWriter().use { writer ->
                 writer.print("${loc.world.name},${loc.x},${loc.y},${loc.z},${loc.yaw},${loc.pitch}")
+            }
+        }
+
+        chestPosition?.let { loc ->
+            chestFile.printWriter().use {writer ->
+                writer.print("${loc.world.name},${loc.x},${loc.y},${loc.z}")
             }
         }
 

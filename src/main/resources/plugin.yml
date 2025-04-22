@@ -32,6 +32,10 @@ commands:
     description: Удаляет все данные плагина
     usage: /rmassigndat
     permission: columns.admin
+  assignchest:
+    description: Устанавливает позицию сундука, кликнув палочкой
+    usage: /assignchest
+    permission: columns.admin
 permissions:
   columns.admin:
     description: Доступ к административным командам плагина Columns
